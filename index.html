@@ -1,0 +1,41 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1.0, user-scalable=no">
+  
+  <script type="text/javascript" src="js/main.js"></script>
+  <script type="text/javascript" src="js/viz.js"></script>
+
+</head>
+
+<!-- <style type="text/css">
+	.scale svg {
+		width: 100%;
+	}
+</style> -->
+
+<body>
+  <script type="text/javascript">
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+    var app = Elm.Main.init({flags: {width: width, height: height}});
+
+    const workerURL = 'js/full.render.js';
+    let viz = new Viz({ workerURL });
+   
+    app.ports.toRender.subscribe(function(str) {
+      
+      viz.renderString(str)
+  	  .then(function(result) {
+        app.ports.svgStrSub.send(result);
+      })
+
+    });
+
+  </script>
+
+</body>
+
+</html>
+
