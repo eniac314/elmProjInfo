@@ -99,15 +99,19 @@ update msg model =
         ContentLoaded json ->
             case D.decodeString (D.list moduleInfoDec) json of
                 Ok data ->
-                    ( { model | projInfo = data }
-                    , toRender <| graphDOTStr data
+                    let
+                        newModel =
+                            { model | projInfo = data }
+                    in
+                    ( newModel
+                    , toRender <| graphDOTStr newModel
                     )
 
                 Err _ ->
                     ( model, Cmd.none )
 
         RenderGraph ->
-            ( model, toRender <| graphDOTStr model.projInfo )
+            ( model, toRender <| graphDOTStr model )
 
         SvgStr s ->
             ( { model | svgStr = trimXml s }
@@ -142,8 +146,6 @@ view model =
                     , label = text "Load projInfo"
                     }
                 , svgElement model
-
-                --, text <| Debug.toString <| parseToNode model.svgStr
                 ]
             )
         ]
@@ -202,7 +204,7 @@ exportDec =
 -------------------------------------------------------------------------------
 
 
-makeGraph : List ModuleInfo -> Graph NodeLabel String
+makeGraph : List ModuleInfo -> Graph NodeLabel EdgeLabel
 makeGraph mis =
     let
         nodeDict =
@@ -222,7 +224,7 @@ getNodes mis =
         |> groupNodes
 
 
-getEdges : List ModuleInfo -> Dict String (Node NodeLabel) -> List (Edge String)
+getEdges : List ModuleInfo -> Dict String (Node NodeLabel) -> List (Edge EdgeLabel)
 getEdges mis nodes =
     List.foldr
         (\mi acc ->
@@ -234,7 +236,19 @@ getEdges mis nodes =
                                 (\i ->
                                     case Dict.get i.impName nodes of
                                         Just node ->
-                                            Just <| Edge node.id mId ""
+                                            Just <|
+                                                Edge node.id
+                                                    mId
+                                                    (EdgeLabel node.label.group
+                                                        (Dict.fromList
+                                                            [ ( "label", "" )
+                                                            , ( "color"
+                                                              , Dict.get "fillcolor" node.label.attrs
+                                                                    |> Maybe.withDefault ""
+                                                              )
+                                                            ]
+                                                        )
+                                                    )
 
                                         Nothing ->
                                             Nothing
@@ -252,6 +266,12 @@ getEdges mis nodes =
 
 
 type alias NodeLabel =
+    { group : String
+    , attrs : Dict String String
+    }
+
+
+type alias EdgeLabel =
     { group : String
     , attrs : Dict String String
     }
@@ -316,19 +336,21 @@ groupNodes nodeDict =
         nodeDict
 
 
-graphStyle =
+graphStyle model =
     { defaultStyles
         | rankdir = DOT.LR
         , node = "shape = box, colorscheme = set312"
+        , edge = "colorscheme = set312"
     }
 
 
-graphDOTStr mis =
+graphDOTStr model =
     DOT.outputWithStylesAndAttributes
-        graphStyle
+        (graphStyle model)
         .attrs
-        (\l -> Dict.fromList [ ( "label", l ) ])
-        (makeGraph mis)
+        .attrs
+        (makeGraph model.projInfo)
+        |> addSubgraphs model
 
 
 svgElement : Model -> Element msg
@@ -377,3 +399,49 @@ trimXml s =
 
         n :: xs ->
             String.dropLeft n s
+
+
+addSubgraphs : Model -> String -> String
+addSubgraphs model s =
+    let
+        groupedNodes =
+            getNodes model.projInfo
+                |> Dict.foldr
+                    (\k n acc ->
+                        Dict.update
+                            n.label.group
+                            (\mbNodes ->
+                                case mbNodes of
+                                    Just nodes ->
+                                        Just <| String.fromInt n.id :: nodes
+
+                                    Nothing ->
+                                        Just [ String.fromInt n.id ]
+                            )
+                            acc
+                    )
+                    Dict.empty
+                |> Dict.values
+
+        makeSubGraph n xs_ =
+            "  subgraph cluster_"
+                ++ String.fromInt n
+                ++ " {\n"
+                ++ "  style = invis;\n"
+                ++ "  rank = same"
+                ++ String.fromInt n
+                ++ "; "
+                ++ (List.map (\node -> node ++ "; ") xs_
+                        |> String.join ""
+                   )
+                ++ "\n  }\n\n"
+    in
+    "\n"
+        ++ String.dropRight 2 s
+        ++ "\n\n"
+        ++ (Tuple.first <|
+                List.foldr (\gs ( res, n ) -> ( makeSubGraph n gs ++ res, n + 1 ))
+                    ( "", 0 )
+                    groupedNodes
+           )
+        ++ "\n}\n"
