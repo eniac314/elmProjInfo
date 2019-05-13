@@ -14,14 +14,17 @@ import File exposing (..)
 import File.Select as Select
 import Graph exposing (..)
 import Graph.DOT as DOT exposing (..)
-import Graph.TGF as TGF exposing (..)
 import Html as Html
 import Html.Attributes as Attr
 import Html.Events exposing (onClick)
+import IntDict as IntDict
 import Json.Decode as D
+import ModuleGraph exposing (..)
+import ModuleInfo exposing (..)
 import Murmur3 exposing (hashString)
 import Set
 import String.Extra exposing (leftOf)
+import StyleHelpers exposing (..)
 import SvgParser exposing (SvgNode(..), nodeToSvg, parse, parseToNode)
 import Task exposing (perform)
 
@@ -34,9 +37,16 @@ port svgStrSub : (String -> msg) -> Sub msg
 
 type alias Model =
     { projInfo : List ModuleInfo
+    , projGraph : Maybe (Graph NodeLabel EdgeLabel)
+    , currentGraph : Maybe (Graph NodeLabel EdgeLabel)
+    , orientation : DOT.Rankdir
+    , grouping : Bool
+    , edgeColors : Bool
     , svgStr : String
     , width : Int
     , height : Int
+    , currentGroup : Maybe String
+    , currentNode : Maybe Int
     }
 
 
@@ -60,6 +70,7 @@ type Msg
     = RequestFile
     | FileLoaded File
     | ContentLoaded String
+    | SetOrientation DOT.Rankdir
     | RenderGraph
     | SvgStr String
     | WinResize Int Int
@@ -69,9 +80,16 @@ type Msg
 init : Flags -> ( Model, Cmd Msg )
 init flags =
     ( { projInfo = []
+      , projGraph = Nothing
+      , currentGraph = Nothing
+      , orientation = DOT.LR
+      , grouping = True
+      , edgeColors = True
       , svgStr = ""
       , width = flags.width
       , height = flags.height
+      , currentGroup = Nothing
+      , currentNode = Nothing
       }
     , Cmd.none
     )
@@ -83,6 +101,13 @@ subscriptions model =
         [ onResize WinResize
         , svgStrSub SvgStr
         ]
+
+
+
+-------------------------------------------------------------------------------
+----------------------
+-- Update functions --
+----------------------
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -100,15 +125,29 @@ update msg model =
             case D.decodeString (D.list moduleInfoDec) json of
                 Ok data ->
                     let
+                        newGraph =
+                            makeGraph data
+
                         newModel =
-                            { model | projInfo = data }
+                            { model
+                                | projInfo = data
+                                , projGraph = Just newGraph
+                                , currentGraph = Just newGraph
+                            }
                     in
                     ( newModel
-                    , toRender <| graphDOTStr newModel
+                    , Cmd.none
                     )
 
                 Err _ ->
                     ( model, Cmd.none )
+
+        SetOrientation o ->
+            let
+                newModel =
+                    { model | orientation = o }
+            in
+            ( newModel, toRender <| graphDOTStr newModel )
 
         RenderGraph ->
             ( model, toRender <| graphDOTStr model )
@@ -130,6 +169,13 @@ update msg model =
             ( model, Cmd.none )
 
 
+
+-------------------------------------------------------------------------------
+--------------------
+-- View functions --
+--------------------
+
+
 view : Model -> Browser.Document Msg
 view model =
     { title = "Project Info visualizer"
@@ -139,12 +185,32 @@ view model =
             , Font.size 16
             ]
             (column
-                [ width (px 1200) ]
-                [ Input.button
-                    []
-                    { onPress = Just RequestFile
-                    , label = text "Load projInfo"
-                    }
+                [ width fill
+                , padding 15
+                , spacing 15
+                ]
+                [ row
+                    [ spacing 15
+                    , width fill
+                    ]
+                    [ Input.button
+                        (buttonStyle True)
+                        { onPress = Just RequestFile
+                        , label = text "Load project info"
+                        }
+                    , row
+                        [ spacing 15
+                        , alignRight
+                        ]
+                        [ orientationView model
+                        , Input.button
+                            (buttonStyle (model.currentGraph /= Nothing))
+                            { onPress =
+                                Maybe.map (\_ -> RenderGraph) model.currentGraph
+                            , label = text "Render graph"
+                            }
+                        ]
+                    ]
                 , svgElement model
                 ]
             )
@@ -152,210 +218,30 @@ view model =
     }
 
 
-
--------------------------------------------------------------------------------
-
-
-type alias ModuleInfo =
-    { nbrLoc : Int
-    , imports : List Import
-    , exports : Export
-    , modName : String
-    }
-
-
-type alias Import =
-    { impName : String
-    , impTypes : List String
-    , impFun : List String
-    }
-
-
-type alias Export =
-    { expTypes : List String
-    , expFun : List String
-    }
-
-
-moduleInfoDec =
-    D.map4 ModuleInfo
-        (D.field "nbrLoc" D.int)
-        (D.field "imports" (D.list importDec))
-        (D.field "exports" exportDec)
-        (D.field "modName" D.string)
-
-
-importDec : D.Decoder Import
-importDec =
-    D.map3 Import
-        (D.field "impName" D.string)
-        (D.field "impTypes" (D.list D.string))
-        (D.field "impFun" (D.list D.string))
-
-
-exportDec : D.Decoder Export
-exportDec =
-    D.map2 Export
-        (D.field "expTypes" (D.list D.string))
-        (D.field "expFun" (D.list D.string))
-
-
-
--------------------------------------------------------------------------------
-
-
-makeGraph : List ModuleInfo -> Graph NodeLabel EdgeLabel
-makeGraph mis =
-    let
-        nodeDict =
-            getNodes mis
-
-        edges =
-            getEdges mis nodeDict
-    in
-    fromNodesAndEdges (Dict.values nodeDict) edges
-
-
-getNodes : List ModuleInfo -> Dict String (Node NodeLabel)
-getNodes mis =
-    List.indexedMap (\i mi -> Node i mi.modName) mis
-        |> List.map (\n -> ( n.label, n ))
-        |> Dict.fromList
-        |> groupNodes
-
-
-getEdges : List ModuleInfo -> Dict String (Node NodeLabel) -> List (Edge EdgeLabel)
-getEdges mis nodes =
-    List.foldr
-        (\mi acc ->
-            let
-                currentEdges =
-                    case Maybe.map .id (Dict.get mi.modName nodes) of
-                        Just mId ->
-                            List.map
-                                (\i ->
-                                    case Dict.get i.impName nodes of
-                                        Just node ->
-                                            Just <|
-                                                Edge node.id
-                                                    mId
-                                                    (EdgeLabel node.label.group
-                                                        (Dict.fromList
-                                                            [ ( "label", "" )
-                                                            , ( "color"
-                                                              , Dict.get "fillcolor" node.label.attrs
-                                                                    |> Maybe.withDefault ""
-                                                              )
-                                                            ]
-                                                        )
-                                                    )
-
-                                        Nothing ->
-                                            Nothing
-                                )
-                                mi.imports
-                                |> List.filterMap identity
-
-                        Nothing ->
-                            []
-            in
-            currentEdges ++ acc
-        )
-        []
-        mis
-
-
-type alias NodeLabel =
-    { group : String
-    , attrs : Dict String String
-    }
-
-
-type alias EdgeLabel =
-    { group : String
-    , attrs : Dict String String
-    }
-
-
-groupNodes : Dict String (Node String) -> Dict String (Node NodeLabel)
-groupNodes nodeDict =
-    let
-        getGroup s =
-            if leftOf "." s == "" then
-                s
-            else
-                leftOf "." s
-
-        groups =
-            Dict.foldr
-                (\k _ acc ->
-                    Set.insert (getGroup k) acc
-                )
-                Set.empty
-                nodeDict
-                |> Set.toList
-
-        shapes =
-            [ "box"
-            , "octagon"
-            , "cylinder"
+orientationView : Model -> Element Msg
+orientationView model =
+    Input.radioRow
+        [ spacing 10 ]
+        { onChange = SetOrientation
+        , options =
+            [ Input.option DOT.TB (el [] (text "TB"))
+            , Input.option DOT.LR (el [] (text "LR"))
+            , Input.option DOT.BT (el [] (text "BT"))
+            , Input.option DOT.RL (el [] (text "RL"))
             ]
-
-        groupColors =
-            List.indexedMap
-                (\i g ->
-                    ( g
-                    , 1 + modBy 12 i |> String.fromInt
-                    )
-                )
-                groups
-                |> Dict.fromList
-    in
-    Dict.map
-        (\k node ->
-            let
-                g =
-                    getGroup k
-
-                col =
-                    Dict.get g groupColors
-                        |> Maybe.withDefault "1"
-            in
-            { id = node.id
-            , label =
-                NodeLabel
-                    g
-                    (Dict.fromList
-                        [ ( "label", k )
-                        , ( "style", "filled" )
-                        , ( "fillcolor", col )
-                        ]
-                    )
-            }
-        )
-        nodeDict
+        , selected = Just model.orientation
+        , label = Input.labelLeft [] (text "Orientation")
+        }
 
 
-graphStyle model =
-    { defaultStyles
-        | rankdir = DOT.LR
-        , node = "shape = box, colorscheme = set312"
-        , edge = "colorscheme = set312"
-    }
+modulePickerView : Model -> Element Msg
+modulePickerView model =
+    Element.none
 
 
-graphDOTStr model =
-    DOT.outputWithStylesAndAttributes
-        (graphStyle model)
-        .attrs
-        .attrs
-        (makeGraph model.projInfo)
-        |> addSubgraphs model
-
-
-svgElement : Model -> Element msg
-svgElement model =
-    case parseToNode model.svgStr of
+svgElement : Config a -> Element msg
+svgElement config =
+    case parseToNode config.svgStr of
         Ok (SvgElement element) ->
             let
                 attributes =
@@ -376,9 +262,12 @@ svgElement model =
                 ratio =
                     width / height
 
+                maxWidth =
+                    config.width - 30
+
                 newAttr =
-                    Dict.insert "width" (String.fromInt model.width ++ "px") attributes
-                        |> Dict.insert "height" (String.fromInt (toFloat model.width / ratio |> round) ++ "px")
+                    Dict.insert "width" (String.fromInt maxWidth ++ "px") attributes
+                        |> Dict.insert "height" (String.fromInt (toFloat maxWidth / ratio |> round) ++ "px")
                         |> Dict.toList
             in
             nodeToSvg (SvgElement { element | attributes = newAttr })
@@ -390,58 +279,3 @@ svgElement model =
 
         _ ->
             Element.none
-
-
-trimXml s =
-    case String.indexes "<svg " s of
-        [] ->
-            s
-
-        n :: xs ->
-            String.dropLeft n s
-
-
-addSubgraphs : Model -> String -> String
-addSubgraphs model s =
-    let
-        groupedNodes =
-            getNodes model.projInfo
-                |> Dict.foldr
-                    (\k n acc ->
-                        Dict.update
-                            n.label.group
-                            (\mbNodes ->
-                                case mbNodes of
-                                    Just nodes ->
-                                        Just <| String.fromInt n.id :: nodes
-
-                                    Nothing ->
-                                        Just [ String.fromInt n.id ]
-                            )
-                            acc
-                    )
-                    Dict.empty
-                |> Dict.values
-
-        makeSubGraph n xs_ =
-            "  subgraph cluster_"
-                ++ String.fromInt n
-                ++ " {\n"
-                ++ "  style = invis;\n"
-                ++ "  rank = same"
-                ++ String.fromInt n
-                ++ "; "
-                ++ (List.map (\node -> node ++ "; ") xs_
-                        |> String.join ""
-                   )
-                ++ "\n  }\n\n"
-    in
-    "\n"
-        ++ String.dropRight 2 s
-        ++ "\n\n"
-        ++ (Tuple.first <|
-                List.foldr (\gs ( res, n ) -> ( makeSubGraph n gs ++ res, n + 1 ))
-                    ( "", 0 )
-                    groupedNodes
-           )
-        ++ "\n}\n"
