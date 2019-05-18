@@ -22,6 +22,7 @@ import Json.Decode as D
 import ModuleGraph exposing (..)
 import ModuleInfo exposing (..)
 import Murmur3 exposing (hashString)
+import Palette exposing (..)
 import Set
 import String.Extra exposing (leftOf)
 import StyleHelpers exposing (..)
@@ -47,7 +48,15 @@ type alias Model =
     , height : Int
     , currentGroup : Maybe String
     , currentNode : Maybe Int
+    , currentFilter : Filter
     }
+
+
+type Filter
+    = NoFilter
+    | Group
+    | Ancestors
+    | Descendants
 
 
 type alias Flags =
@@ -71,7 +80,9 @@ type Msg
     | FileLoaded File
     | ContentLoaded String
     | SetOrientation DOT.Rankdir
-    | RenderGraph
+    | SetFilter Filter
+    | PickGroup String
+    | PickNode Int
     | SvgStr String
     | WinResize Int Int
     | NoOp
@@ -90,6 +101,7 @@ init flags =
       , height = flags.height
       , currentGroup = Nothing
       , currentNode = Nothing
+      , currentFilter = NoFilter
       }
     , Cmd.none
     )
@@ -133,10 +145,13 @@ update msg model =
                                 | projInfo = data
                                 , projGraph = Just newGraph
                                 , currentGraph = Just newGraph
+                                , currentGroup = Nothing
+                                , currentNode = Nothing
+                                , currentFilter = NoFilter
                             }
                     in
                     ( newModel
-                    , Cmd.none
+                    , toRender <| graphDOTStr newModel
                     )
 
                 Err _ ->
@@ -149,8 +164,72 @@ update msg model =
             in
             ( newModel, toRender <| graphDOTStr newModel )
 
-        RenderGraph ->
-            ( model, toRender <| graphDOTStr model )
+        SetFilter f ->
+            let
+                currentGraph =
+                    generateCurrentGraph
+                        model.projGraph
+                        f
+                        model.currentNode
+                        model.currentGroup
+
+                newModel =
+                    { model
+                        | currentFilter = f
+                        , currentGraph = currentGraph
+                    }
+            in
+            ( newModel, toRender <| graphDOTStr newModel )
+
+        PickGroup group ->
+            let
+                newGroup =
+                    if model.currentGroup == Just group then
+                        Nothing
+                    else
+                        Just group
+
+                currentGraph =
+                    generateCurrentGraph
+                        model.projGraph
+                        model.currentFilter
+                        model.currentNode
+                        (Just group)
+
+                newModel =
+                    { model
+                        | currentGroup = newGroup
+                        , currentGraph = currentGraph
+                    }
+            in
+            ( newModel
+            , toRender <| graphDOTStr newModel
+            )
+
+        PickNode nodeId ->
+            let
+                newNode =
+                    if model.currentNode == Just nodeId then
+                        Nothing
+                    else
+                        Just nodeId
+
+                currentGraph =
+                    generateCurrentGraph
+                        model.projGraph
+                        model.currentFilter
+                        (Just nodeId)
+                        model.currentGroup
+
+                newModel =
+                    { model
+                        | currentNode = newNode
+                        , currentGraph = currentGraph
+                    }
+            in
+            ( newModel
+            , toRender <| graphDOTStr newModel
+            )
 
         SvgStr s ->
             ( { model | svgStr = trimXml s }
@@ -167,6 +246,27 @@ update msg model =
 
         NoOp ->
             ( model, Cmd.none )
+
+
+generateCurrentGraph :
+    Maybe (Graph NodeLabel EdgeLabel)
+    -> Filter
+    -> Maybe Int
+    -> Maybe String
+    -> Maybe (Graph NodeLabel EdgeLabel)
+generateCurrentGraph projGraph filter mbNodeId mbGroup =
+    case ( filter, mbNodeId, mbGroup ) of
+        ( Ancestors, Just id, _ ) ->
+            Maybe.map (ancestorGraph id) projGraph
+
+        ( Descendants, Just id, _ ) ->
+            Maybe.map (descendantGraph id) projGraph
+
+        ( Group, _, Just group ) ->
+            Maybe.map (trimToGroup group) projGraph
+
+        _ ->
+            projGraph
 
 
 
@@ -200,17 +300,13 @@ view model =
                         }
                     , row
                         [ spacing 15
-                        , alignRight
+                        , width fill
                         ]
                         [ orientationView model
-                        , Input.button
-                            (buttonStyle (model.currentGraph /= Nothing))
-                            { onPress =
-                                Maybe.map (\_ -> RenderGraph) model.currentGraph
-                            , label = text "Render graph"
-                            }
+                        , projSizeView model
                         ]
                     ]
+                , modulePickerView model
                 , svgElement model
                 ]
             )
@@ -230,13 +326,138 @@ orientationView model =
             , Input.option DOT.RL (el [] (text "RL"))
             ]
         , selected = Just model.orientation
-        , label = Input.labelLeft [] (text "Orientation")
+        , label =
+            Input.labelLeft
+                [ paddingEach { sides | right = 10 } ]
+                (text "Orientation:")
         }
+
+
+projSizeView : Model -> Element Msg
+projSizeView model =
+    let
+        size =
+            model.projInfo
+                |> List.map .nbrLoc
+                |> List.sum
+    in
+    el
+        [ alignRight ]
+        (text <|
+            "Project size: "
+                ++ String.fromInt size
+                ++ " LOC"
+        )
+
+
+filterView : Model -> Element Msg
+filterView model =
+    el
+        [ alignTop ]
+        (Input.radio
+            [ spacing 10 ]
+            { onChange = SetFilter
+            , options =
+                [ Input.option NoFilter (el [] (text "None"))
+                , Input.option Ancestors (el [] (text "Imports"))
+                , Input.option Descendants (el [] (text "Clients"))
+                , Input.option Group (el [] (text "Group"))
+                ]
+            , selected = Just model.currentFilter
+            , label =
+                Input.labelAbove
+                    [ paddingEach { sides | bottom = 10 } ]
+                    (text "Filter:")
+            }
+        )
 
 
 modulePickerView : Model -> Element Msg
 modulePickerView model =
-    Element.none
+    let
+        groups =
+            model.projGraph
+                |> Maybe.withDefault Graph.empty
+                |> groupDict
+
+        nodes =
+            case model.currentGroup of
+                Just g ->
+                    Dict.get g groups
+                        |> Maybe.withDefault []
+
+                Nothing ->
+                    Dict.values groups
+                        |> List.concat
+
+        groupView group =
+            el
+                [ Events.onClick (PickGroup group)
+                , width fill
+                , if model.currentGroup == Just group then
+                    Background.color lightBlue
+                  else
+                    noAttr
+                , mouseOver
+                    [ if model.currentGroup == Just group then
+                        Background.color lightBlue
+                      else
+                        Background.color lightGrey
+                    ]
+                , pointer
+                , paddingXY 10 7
+                ]
+                (text group)
+
+        nodeView node =
+            el
+                [ Events.onClick (PickNode node.id)
+                , width fill
+                , if model.currentNode == Just node.id then
+                    Background.color lightBlue
+                  else
+                    noAttr
+                , mouseOver
+                    [ if model.currentNode == Just node.id then
+                        Background.color lightBlue
+                      else
+                        Background.color lightGrey
+                    ]
+                , pointer
+                , paddingXY 10 7
+                ]
+                (text
+                    (Dict.get "label" node.label.attrs
+                        |> Maybe.withDefault ""
+                    )
+                )
+
+        groupsView =
+            column
+                [ width (px 400)
+                , height (px 300)
+                , scrollbarY
+                , Border.width 1
+                , Border.color grey
+                ]
+                (List.map groupView (Dict.keys groups))
+
+        nodesView =
+            column
+                [ width (px 400)
+                , height (px 300)
+                , scrollbarY
+                , Border.width 1
+                , Border.color grey
+                ]
+                (List.map nodeView nodes)
+    in
+    row
+        [ spacing 15 ]
+        [ groupsView
+        , nodesView
+        , filterView model
+        ]
 
 
 svgElement : Config a -> Element msg

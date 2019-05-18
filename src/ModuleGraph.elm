@@ -56,23 +56,40 @@ makeGraph mis =
     fromNodesAndEdges (Dict.values nodeDict) edges
 
 
+ancestorGraph : NodeId -> Graph n e -> Graph n e
 ancestorGraph id g =
     let
         ans =
             findAncestors id g
-
-        ns =
-            Graph.nodeIds g
     in
+    trimGraph ans g
+
+
+descendantGraph : NodeId -> Graph n e -> Graph n e
+descendantGraph id g =
+    let
+        des =
+            findDescendants id g
+    in
+    trimGraph des g
+
+
+trimGraph : List NodeId -> Graph n e -> Graph n e
+trimGraph xs g =
     List.foldr
         (\n acc ->
-            if not <| List.member n ans then
+            if not <| List.member n xs then
                 Graph.remove n acc
             else
                 acc
         )
         g
-        ns
+        (Graph.nodeIds g)
+
+
+findDescendants : NodeId -> Graph n e -> List NodeId
+findDescendants id g =
+    findAncestors id (Graph.reverseEdges g)
 
 
 findAncestors : NodeId -> Graph n e -> List NodeId
@@ -96,6 +113,15 @@ findAncestors id g =
                             acc
     in
     go [] [ id ]
+
+
+trimToGroup : String -> Graph NodeLabel EdgeLabel -> Graph NodeLabel EdgeLabel
+trimToGroup group g =
+    groupDict g
+        |> Dict.get group
+        |> Maybe.withDefault []
+        |> List.map .id
+        |> (\ns -> trimGraph ns g)
 
 
 
@@ -170,6 +196,26 @@ groupNodes nodeDict =
             }
         )
         nodeDict
+
+
+groupDict : Graph NodeLabel EdgeLabel -> Dict String (List (Node NodeLabel))
+groupDict g =
+    Graph.nodes g
+        |> List.foldr
+            (\n acc ->
+                Dict.update
+                    n.label.group
+                    (\mbNodes ->
+                        case mbNodes of
+                            Just nodes ->
+                                Just <| n :: nodes
+
+                            Nothing ->
+                                Just [ n ]
+                    )
+                    acc
+            )
+            Dict.empty
 
 
 
@@ -258,23 +304,9 @@ addSubgraphs config s =
         Just graph ->
             let
                 groupedNodes =
-                    Graph.nodes graph
-                        |> List.foldr
-                            (\n acc ->
-                                Dict.update
-                                    n.label.group
-                                    (\mbNodes ->
-                                        case mbNodes of
-                                            Just nodes ->
-                                                Just <| String.fromInt n.id :: nodes
-
-                                            Nothing ->
-                                                Just [ String.fromInt n.id ]
-                                    )
-                                    acc
-                            )
-                            Dict.empty
+                    groupDict graph
                         |> Dict.values
+                        |> List.map (List.map (String.fromInt << .id))
 
                 makeSubGraph n xs_ =
                     "  subgraph cluster_"

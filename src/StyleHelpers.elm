@@ -16,6 +16,18 @@ import Html.Attributes as HtmlAttr
 import Palette exposing (..)
 
 
+sides =
+    { top = 0
+    , left = 0
+    , right = 0
+    , bottom = 0
+    }
+
+
+noAttr =
+    htmlAttribute <| HtmlAttr.class ""
+
+
 buttonStyle isActive =
     [ Border.rounded 5
     , Font.center
